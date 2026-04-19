@@ -9,7 +9,10 @@ import sys
 import time
 import os
 import hashlib
+import secrets
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from typing import Iterable, List, Optional
 
@@ -32,6 +35,9 @@ PTPIMG_ENDPOINT = "https://ptpimg.me/upload.php"  # 固定上传入口
 CACHE_ENABLED = True
 CACHE_TTL_SECONDS = 600  # 600s
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "douban_meta_cache")
+HISTORY_FILE = os.path.join(CACHE_DIR, "history.jsonl")
+ADMIN_PASSWORD = os.getenv("PTGEN_ADMIN_PASSWORD", "admin123")
+ADMIN_SESSION_TTL = 3600
 
 # =========================  全 局 参 数  =========================
 
@@ -173,6 +179,84 @@ def cache_set(key: str, out: str) -> None:
         os.replace(tmp, path)
     except Exception:
         pass
+
+
+_admin_sessions = {}
+_admin_lock = threading.Lock()
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append_history(inp: str, ok: bool, source: str, duration_ms: int, error: str = "") -> None:
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        item = {
+            "ts": _now_iso(),
+            "input": inp,
+            "ok": bool(ok),
+            "source": source,
+            "duration_ms": duration_ms,
+            "error": error,
+        }
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _read_history(limit: int = 100) -> List[dict]:
+    try:
+        if not os.path.exists(HISTORY_FILE):
+            return []
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            lines = [x.strip() for x in f.readlines() if x.strip()]
+        out = []
+        for line in reversed(lines):
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+            if len(out) >= limit:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def _cache_stats() -> dict:
+    try:
+        if not os.path.exists(CACHE_DIR):
+            return {"cache_dir": CACHE_DIR, "files": 0, "bytes": 0}
+        total_files = 0
+        total_bytes = 0
+        for name in os.listdir(CACHE_DIR):
+            p = os.path.join(CACHE_DIR, name)
+            if not os.path.isfile(p):
+                continue
+            total_files += 1
+            total_bytes += os.path.getsize(p)
+        return {"cache_dir": CACHE_DIR, "files": total_files, "bytes": total_bytes}
+    except Exception:
+        return {"cache_dir": CACHE_DIR, "files": 0, "bytes": 0}
+
+
+def _clear_cache_files() -> int:
+    deleted = 0
+    try:
+        if not os.path.exists(CACHE_DIR):
+            return 0
+        for name in os.listdir(CACHE_DIR):
+            if not name.endswith(".json"):
+                continue
+            p = os.path.join(CACHE_DIR, name)
+            if os.path.isfile(p):
+                os.remove(p)
+                deleted += 1
+    except Exception:
+        pass
+    return deleted
 
 # =========================  JSON / HTML 解析 =========================
 
@@ -629,7 +713,7 @@ def main() -> None:
     #   python ptgen.py <imdb|douban_url>   -> CLI 文本输出
     #   python ptgen.py --serve [host] [port] -> 启动 Web + API
     if len(sys.argv) >= 2 and sys.argv[1] == "--serve":
-        host = sys.argv[2] if len(sys.argv) >= 3 else "127.0.0.1"
+        host = sys.argv[2] if len(sys.argv) >= 3 else "0.0.0.0"
         port = int(sys.argv[3]) if len(sys.argv) >= 4 else 53000
         run_server(host, port)
         return
@@ -679,60 +763,155 @@ def generate_from_input(inp: str) -> str:
 
 
 class PTGenHandler(BaseHTTPRequestHandler):
-    """极简 Web UI + API。"""
+    """Web UI + API + Admin 后台。"""
 
-    def _send_json(self, code: int, payload: dict) -> None:
+    def _send_json(self, code: int, payload: dict, extra_headers: Optional[dict] = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_html(self, html: str) -> None:
+    def _send_html(self, html: str, code: int = 200) -> None:
         body = html.encode("utf-8")
-        self.send_response(200)
+        self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", errors="ignore") if length > 0 else ""
+        try:
+            return json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return {}
+
+    def _cookies(self) -> dict:
+        raw = self.headers.get("Cookie", "")
+        out = {}
+        for p in raw.split(";"):
+            if "=" not in p:
+                continue
+            k, v = p.strip().split("=", 1)
+            out[k] = v
+        return out
+
+    def _create_session(self) -> str:
+        token = secrets.token_urlsafe(24)
+        with _admin_lock:
+            _admin_sessions[token] = time.time() + ADMIN_SESSION_TTL
+        return token
+
+    def _is_admin(self) -> bool:
+        token = self._cookies().get("ptgen_admin_session", "")
+        if not token:
+            return False
+        with _admin_lock:
+            exp = _admin_sessions.get(token, 0)
+            if exp < time.time():
+                _admin_sessions.pop(token, None)
+                return False
+            return True
+
+    def _admin_required(self) -> bool:
+        if self._is_admin():
+            return True
+        self._send_json(401, {"ok": False, "error": "admin 未登录"})
+        return False
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+        self.end_headers()
 
     def do_GET(self) -> None:
         p = urlparse(self.path)
         if p.path == "/":
             self._send_html(self._index_html())
             return
+        if p.path == "/admin":
+            self._send_html(self._admin_html() if self._is_admin() else self._admin_login_html())
+            return
         if p.path == "/api/generate":
             qs = parse_qs(p.query)
             inp = (qs.get("input") or [""])[0].strip()
-            self._handle_generate(inp)
+            self._handle_generate(inp, source="api_get")
+            return
+        if p.path == "/api/admin/stats":
+            if not self._admin_required():
+                return
+            self._send_json(200, {"ok": True, "stats": _cache_stats(), "session_ttl": ADMIN_SESSION_TTL})
+            return
+        if p.path == "/api/admin/history":
+            if not self._admin_required():
+                return
+            qs = parse_qs(p.query)
+            limit = int((qs.get("limit") or ["100"])[0] or "100")
+            limit = max(1, min(limit, 500))
+            self._send_json(200, {"ok": True, "items": _read_history(limit)})
             return
         self.send_error(404, "Not Found")
 
     def do_POST(self) -> None:
         p = urlparse(self.path)
-        if p.path != "/api/generate":
-            self.send_error(404, "Not Found")
+        if p.path == "/api/generate":
+            data = self._json_body()
+            self._handle_generate(str(data.get("input", "")).strip(), source="api_post")
             return
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        raw = self.rfile.read(length).decode("utf-8", errors="ignore") if length > 0 else ""
-        inp = ""
-        try:
-            data = json.loads(raw) if raw.strip() else {}
-            inp = str(data.get("input", "")).strip()
-        except Exception:
-            inp = ""
-        self._handle_generate(inp)
+        if p.path == "/api/admin/login":
+            data = self._json_body()
+            password = str(data.get("password", ""))
+            if not ADMIN_PASSWORD or password != ADMIN_PASSWORD:
+                self._send_json(403, {"ok": False, "error": "密码错误"})
+                return
+            token = self._create_session()
+            self._send_json(
+                200,
+                {"ok": True},
+                {"Set-Cookie": f"ptgen_admin_session={token}; HttpOnly; Path=/; Max-Age={ADMIN_SESSION_TTL}; SameSite=Lax"},
+            )
+            return
+        if p.path == "/api/admin/logout":
+            token = self._cookies().get("ptgen_admin_session", "")
+            with _admin_lock:
+                _admin_sessions.pop(token, None)
+            self._send_json(
+                200,
+                {"ok": True},
+                {"Set-Cookie": "ptgen_admin_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax"},
+            )
+            return
+        if p.path == "/api/admin/cache/clear":
+            if not self._admin_required():
+                return
+            deleted = _clear_cache_files()
+            self._send_json(200, {"ok": True, "deleted": deleted})
+            return
+        self.send_error(404, "Not Found")
 
-    def _handle_generate(self, inp: str) -> None:
+    def _handle_generate(self, inp: str, source: str = "api") -> None:
+        st = time.time()
         if not inp:
             self._send_json(400, {"ok": False, "error": "input 不能为空"})
             return
         txt = generate_from_input(inp)
+        duration_ms = int((time.time() - st) * 1000)
         if not txt:
+            _append_history(inp, False, source, duration_ms, error="解析失败")
             self._send_json(422, {"ok": False, "error": "解析失败，请检查 IMDbID 或豆瓣链接"})
             return
-        self._send_json(200, {"ok": True, "input": inp, "result": txt})
+        _append_history(inp, True, source, duration_ms)
+        self._send_json(200, {"ok": True, "input": inp, "result": txt, "duration_ms": duration_ms})
 
     @staticmethod
     def _index_html() -> str:
@@ -782,10 +961,66 @@ class PTGenHandler(BaseHTTPRequestHandler):
 </body>
 </html>"""
 
+    @staticmethod
+    def _admin_login_html() -> str:
+        return """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ptgen Admin Login</title>
+<style>body{font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px}input,button{padding:10px;border-radius:8px}input{width:100%;border:1px solid #ccc}button{margin-top:8px;background:#1677ff;color:#fff;border:0}pre{background:#f7f7f8;padding:10px;border-radius:8px}</style>
+</head><body>
+<h2>管理后台登录</h2>
+<input id="pwd" type="password" placeholder="管理员密码" />
+<button id="btn">登录</button>
+<pre id="out"></pre>
+<script>
+document.getElementById('btn').onclick=async()=>{
+ const pwd=document.getElementById('pwd').value;
+ const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
+ const d=await r.json();
+ if(d.ok){ location.href='/admin'; return; }
+ document.getElementById('out').textContent='登录失败：'+(d.error||r.status);
+};
+</script>
+</body></html>"""
+
+    @staticmethod
+    def _admin_html() -> str:
+        return """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ptgen Admin</title>
+<style>
+body{font-family:system-ui;max-width:980px;margin:28px auto;padding:0 16px}
+button{padding:8px 12px;border-radius:8px;border:0;background:#1677ff;color:#fff;cursor:pointer;margin-right:8px}
+pre{white-space:pre-wrap;background:#f7f7f8;border:1px solid #eee;border-radius:8px;padding:12px;min-height:180px}
+</style></head><body>
+<h2>ptgen 管理后台</h2>
+<p>功能：缓存统计、缓存清理、请求历史查看、退出登录。</p>
+<div>
+  <button id="stats">刷新统计</button>
+  <button id="history">最近历史</button>
+  <button id="clear">清理缓存</button>
+  <button id="logout">退出登录</button>
+</div>
+<pre id="out"></pre>
+<script>
+const out=document.getElementById('out');
+async function call(url,opt){const r=await fetch(url,opt);const d=await r.json();if(r.status===401){location.href='/admin';return null;}return d;}
+document.getElementById('stats').onclick=async()=>{const d=await call('/api/admin/stats');if(d)out.textContent=JSON.stringify(d,null,2);};
+document.getElementById('history').onclick=async()=>{const d=await call('/api/admin/history?limit=50');if(d)out.textContent=JSON.stringify(d,null,2);};
+document.getElementById('clear').onclick=async()=>{const d=await call('/api/admin/cache/clear',{method:'POST'});if(d)out.textContent=JSON.stringify(d,null,2);};
+document.getElementById('logout').onclick=async()=>{await fetch('/api/admin/logout',{method:'POST'});location.href='/admin';};
+</script>
+</body></html>"""
+
 
 def run_server(host: str, port: int) -> None:
     server = ThreadingHTTPServer((host, port), PTGenHandler)
     print(f"ptgen web server running on http://{host}:{port}")
+    if host == "0.0.0.0":
+        print(f"public access: http://<你的公网IP>:{port}")
+    print("admin panel: /admin (password from PTGEN_ADMIN_PASSWORD, default admin123)")
     server.serve_forever()
 
 if __name__ == "__main__":
