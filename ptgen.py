@@ -9,6 +9,8 @@ import sys
 import time
 import os
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from typing import Iterable, List, Optional
 
 import requests
@@ -623,19 +625,32 @@ class DoubanMovie:
 # =========================  主 程 序  =========================
 
 def main() -> None:
+    # 命令：
+    #   python ptgen.py <imdb|douban_url>   -> CLI 文本输出
+    #   python ptgen.py --serve [host] [port] -> 启动 Web + API
+    if len(sys.argv) >= 2 and sys.argv[1] == "--serve":
+        host = sys.argv[2] if len(sys.argv) >= 3 else "127.0.0.1"
+        port = int(sys.argv[3]) if len(sys.argv) >= 4 else 8000
+        run_server(host, port)
+        return
+
     # 无参数：静默退出
     if len(sys.argv) < 2:
         return
 
-    inp = sys.argv[1].strip()
+    txt = generate_from_input(sys.argv[1].strip())
+    if txt:
+        sys.stdout.write(txt.rstrip() + "\n")
 
+
+def generate_from_input(inp: str) -> str:
+    """统一处理输入并返回最终格式化文本；失败返回空串。"""
     # 1) 先尝试走缓存（同输入 600s 内直接返回；过期会被懒清理删除）
     cache_key = _cache_key_from_input(inp)
     if cache_key:
         cached = cache_get(cache_key, CACHE_TTL_SECONDS)
         if cached:
-            sys.stdout.write(cached.rstrip() + "\n")
-            return
+            return cached
 
     # 2) 解析输入 -> 得到豆瓣 URL
     m = re.search(r"https?://movie\.douban\.com/subject/\d+/?", inp)
@@ -646,22 +661,132 @@ def main() -> None:
         if imdb_id:
             db_url = imdb_to_douban(imdb_id)
         else:
-            return
+            return ""
 
     if not db_url:
-        return
+        return ""
 
     try:
         dm = DoubanMovie(db_url)
         dm.parse()
         txt = dm.format()
-        if txt:
+        if txt and cache_key:
             # 3) 写缓存（只缓存最终输出文本）
-            if cache_key:
-                cache_set(cache_key, txt)
-            sys.stdout.write(txt.rstrip() + "\n")
+            cache_set(cache_key, txt)
+        return txt or ""
     except Exception:
-        return
+        return ""
+
+
+class PTGenHandler(BaseHTTPRequestHandler):
+    """极简 Web UI + API。"""
+
+    def _send_json(self, code: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:
+        p = urlparse(self.path)
+        if p.path == "/":
+            self._send_html(self._index_html())
+            return
+        if p.path == "/api/generate":
+            qs = parse_qs(p.query)
+            inp = (qs.get("input") or [""])[0].strip()
+            self._handle_generate(inp)
+            return
+        self.send_error(404, "Not Found")
+
+    def do_POST(self) -> None:
+        p = urlparse(self.path)
+        if p.path != "/api/generate":
+            self.send_error(404, "Not Found")
+            return
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", errors="ignore") if length > 0 else ""
+        inp = ""
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+            inp = str(data.get("input", "")).strip()
+        except Exception:
+            inp = ""
+        self._handle_generate(inp)
+
+    def _handle_generate(self, inp: str) -> None:
+        if not inp:
+            self._send_json(400, {"ok": False, "error": "input 不能为空"})
+            return
+        txt = generate_from_input(inp)
+        if not txt:
+            self._send_json(422, {"ok": False, "error": "解析失败，请检查 IMDbID 或豆瓣链接"})
+            return
+        self._send_json(200, {"ok": True, "input": inp, "result": txt})
+
+    @staticmethod
+    def _index_html() -> str:
+        return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ptgen Web</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:40px auto;padding:0 16px}
+    .row{display:flex;gap:8px;align-items:center}
+    input{flex:1;padding:10px;border:1px solid #ccc;border-radius:8px}
+    button{padding:10px 16px;border:0;border-radius:8px;background:#1677ff;color:#fff;cursor:pointer}
+    pre{white-space:pre-wrap;background:#f7f7f8;border:1px solid #eee;border-radius:8px;padding:12px;min-height:220px}
+    .hint{color:#666;font-size:14px}
+  </style>
+</head>
+<body>
+  <h1>ptgen Web</h1>
+  <p class="hint">输入 IMDb ID（如 tt0133093）或豆瓣链接，点击“生成”。也可调用 API：<code>/api/generate</code></p>
+  <div class="row">
+    <input id="inp" placeholder="tt0133093 或 https://movie.douban.com/subject/1291843/" />
+    <button id="go">生成</button>
+  </div>
+  <p class="hint">POST JSON 示例：<code>{"input":"tt0133093"}</code></p>
+  <pre id="out">结果会显示在这里…</pre>
+  <script>
+    const out = document.getElementById('out');
+    document.getElementById('go').onclick = async () => {
+      const input = document.getElementById('inp').value.trim();
+      if (!input){ out.textContent = '请输入内容'; return; }
+      out.textContent = '处理中...';
+      try{
+        const r = await fetch('/api/generate', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({input})
+        });
+        const data = await r.json();
+        out.textContent = data.ok ? data.result : ('错误：' + (data.error || r.status));
+      }catch(e){
+        out.textContent = '请求失败：' + e;
+      }
+    };
+  </script>
+</body>
+</html>"""
+
+
+def run_server(host: str, port: int) -> None:
+    server = ThreadingHTTPServer((host, port), PTGenHandler)
+    print(f"ptgen web server running on http://{host}:{port}")
+    server.serve_forever()
 
 if __name__ == "__main__":
     main()
