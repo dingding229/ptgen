@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ptgen-go Admin</title>
+  <style>
+    body{font-family:system-ui;max-width:1100px;margin:30px auto;padding:0 16px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    input{padding:8px;border:1px solid #ccc;border-radius:8px}
+    button{padding:8px 12px;border:0;border-radius:8px;background:#1677ff;color:#fff;cursor:pointer}
+    pre{white-space:pre-wrap;background:#f7f7f8;border:1px solid #eee;border-radius:8px;padding:12px;min-height:260px}
+    .card{padding:12px;border:1px solid #eee;border-radius:10px;margin-bottom:12px}
+  </style>
+</head>
+<body>
+  <h1>ptgen-go 管理后台</h1>
+
+  <div class="card">
+    <h3>登录</h3>
+    <div class="row">
+      <input id="user" placeholder="用户名" value="admin" />
+      <input id="pass" type="password" placeholder="密码" />
+      <button id="login">登录</button>
+      <button id="logout">退出</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>管理操作</h3>
+    <div class="row">
+      <button id="stats">统计</button>
+      <button id="history">历史</button>
+      <button id="clear">清空缓存</button>
+    </div>
+  </div>
+
+  <pre id="out">输出...</pre>
+
+  <script>
+    const out = document.getElementById('out');
+    const tokenKey = 'ptgen_admin_jwt';
+    const getToken = () => localStorage.getItem(tokenKey) || '';
+
+    async function api(url, options={}) {
+      const headers = Object.assign({}, options.headers || {});
+      const token = getToken();
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      const resp = await fetch(url, Object.assign({}, options, { headers }));
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || resp.status);
+      return data;
+    }
+
+    document.getElementById('login').onclick = async () => {
+      try {
+        const username = document.getElementById('user').value.trim();
+        const password = document.getElementById('pass').value;
+        const data = await api('/api/admin/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ username, password })
+        });
+        localStorage.setItem(tokenKey, data.token);
+        out.textContent = '登录成功';
+      } catch (e) {
+        out.textContent = '登录失败：' + e.message;
+      }
+    };
+
+    document.getElementById('logout').onclick = () => {
+      localStorage.removeItem(tokenKey);
+      out.textContent = '已退出';
+    };
+
+    document.getElementById('stats').onclick = async () => {
+      try { out.textContent = JSON.stringify(await api('/api/admin/stats'), null, 2); }
+      catch (e) { out.textContent = '失败：' + e.message; }
+    };
+    document.getElementById('history').onclick = async () => {
+      try { out.textContent = JSON.stringify(await api('/api/admin/history?limit=50'), null, 2); }
+      catch (e) { out.textContent = '失败：' + e.message; }
+    };
+    document.getElementById('clear').onclick = async () => {
+      try { out.textContent = JSON.stringify(await api('/api/admin/cache/clear', {method:'POST'}), null, 2); }
+      catch (e) { out.textContent = '失败：' + e.message; }
+    };
+  </script>
+</body>
+</html>

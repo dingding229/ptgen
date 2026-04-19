@@ -1,72 +1,91 @@
-# ptgen
+# ptgen-go
 
-一个可同时提供 **CLI / Web / API / Admin** 的影视简介生成工具。
+已重构为 **Go 单二进制服务**，内置：
 
-## 启动方式
+- Web 前端（`/`）
+- 生成 API（`/api/generate`）
+- 管理后台（`/admin`）
+- JWT 鉴权管理接口（`/api/admin/*`）
+- SQLite 持久化（用户、历史、缓存）
 
-### 1) CLI
+> 说明：本次是完整技术栈迁移到 Go。`ptgen.py` 保留在仓库中作为旧版本参考，不再作为默认入口。
+
+## 1. 启动
+
 ```bash
-python ptgen.py tt0133093
-# 或
-python ptgen.py https://movie.douban.com/subject/1291843/
+go run .
 ```
 
-### 2) Web + API + 管理后台
-```bash
-# 默认监听 0.0.0.0:53000（可公网访问）
-python ptgen.py --serve
+默认监听：`0.0.0.0:53000`（公网可访问，前提是安全组/防火墙放行端口）。
 
-# 自定义 host/port
-python ptgen.py --serve 0.0.0.0 53000
+可配置环境变量：
+
+- `PTGEN_HOST`（默认 `0.0.0.0`）
+- `PTGEN_PORT`（默认 `53000`）
+- `PTGEN_DB`（默认 `./data/ptgen.db`）
+- `PTGEN_ADMIN_USER`（默认 `admin`）
+- `PTGEN_ADMIN_PASSWORD`（默认 `admin123`）
+- `PTGEN_JWT_SECRET`（生产环境务必修改）
+
+示例：
+
+```bash
+PTGEN_ADMIN_PASSWORD='StrongPass' PTGEN_JWT_SECRET='replace-me' go run .
 ```
 
-访问：
-- Web 页面：`http://<服务器IP>:53000/`
+## 2. 访问地址
+
+- Web：`http://<服务器IP>:53000/`
+- Admin：`http://<服务器IP>:53000/admin`
 - API：`http://<服务器IP>:53000/api/generate`
-- 管理后台：`http://<服务器IP>:53000/admin`
 
-## API 调用
+## 3. API
 
-- GET:
-```bash
-curl 'http://127.0.0.1:53000/api/generate?input=tt0133093'
-```
+### 3.1 生成接口
 
-- POST JSON:
-```bash
-curl -X POST 'http://127.0.0.1:53000/api/generate' \
-  -H 'Content-Type: application/json' \
-  -d '{"input":"tt0133093"}'
-```
+- `GET /api/generate?input=tt0133093`
+- `POST /api/generate` JSON: `{"input":"tt0133093"}`
 
 返回示例：
+
 ```json
 {
   "ok": true,
   "input": "tt0133093",
-  "result": "[img]...[/img]\n◎译　　名 ...",
-  "duration_ms": 1234
+  "result": "[img]...[/img] ...",
+  "duration_ms": 12
 }
 ```
 
-## 管理后台功能
+### 3.2 管理后台 JWT 接口
 
-管理后台默认密码来源于环境变量 `PTGEN_ADMIN_PASSWORD`：
+1) 登录：`POST /api/admin/login`
 
-```bash
-export PTGEN_ADMIN_PASSWORD='your_strong_password'
-python ptgen.py --serve
+```json
+{ "username": "admin", "password": "admin123" }
 ```
 
-后台功能：
-- 登录 / 退出
-- 缓存统计
-- 缓存清理
-- 最近请求历史（含成功/失败、耗时）
+返回：
 
-## 公网访问注意事项
+```json
+{ "ok": true, "token": "<jwt>" }
+```
 
-如果你使用公网 IP 仍无法访问，请检查：
-- 云服务器安全组是否放行 `53000/TCP`
-- 系统防火墙（如 `ufw` / `firewalld`）是否放行 `53000`
-- 是否使用 `0.0.0.0` 监听（默认已开启）
+2) 携带请求头：`Authorization: Bearer <jwt>`
+
+- `GET /api/admin/stats`
+- `GET /api/admin/history?limit=50`
+- `POST /api/admin/cache/clear`
+
+## 4. 数据库结构（SQLite）
+
+- `users`：后台用户
+- `history`：调用历史（成功/失败、耗时、来源）
+- `cache`：生成结果缓存（带 TTL）
+
+## 5. 打包为单二进制
+
+```bash
+go build -o ptgen-go .
+./ptgen-go
+```
