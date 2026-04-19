@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ptgen-go</title>
+  <style>
+    body{font-family:system-ui;max-width:960px;margin:40px auto;padding:0 16px}
+    .row{display:flex;gap:8px}
+    input{flex:1;padding:10px;border:1px solid #ccc;border-radius:8px}
+    button{padding:10px 14px;border:0;border-radius:8px;background:#1677ff;color:#fff;cursor:pointer}
+    pre{white-space:pre-wrap;background:#f7f7f8;border:1px solid #eee;border-radius:8px;padding:12px;min-height:220px}
+  </style>
+</head>
+<body>
+  <h1>ptgen-go Web</h1>
+  <p>输入 IMDb ID（如 tt0133093）或豆瓣链接进行生成。</p>
+  <div class="row">
+    <input id="inp" placeholder="tt0133093 / https://movie.douban.com/subject/1291843/" />
+    <button id="go">生成</button>
+    <button id="admin" onclick="location.href='/admin'">管理后台</button>
+  </div>
+  <pre id="out">结果将在这里显示...</pre>
+  <script>
+    const out = document.getElementById('out');
+    document.getElementById('go').onclick = async () => {
+      const input = document.getElementById('inp').value.trim();
+      if (!input) { out.textContent = '请输入内容'; return; }
+      out.textContent = '处理中...';
+      try {
+        const resp = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ input })
+        });
+        const data = await resp.json();
+        out.textContent = data.ok ? data.result : ('错误：' + (data.error || resp.status));
+      } catch (e) {
+        out.textContent = '请求失败：' + e;
+      }
+    };
+  </script>
+</body>
+</html>
