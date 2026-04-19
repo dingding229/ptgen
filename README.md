@@ -13,16 +13,16 @@
    ```bash
    python ptgen.py --serve
    ```
-   默认监听 `127.0.0.1:8000`，浏览器打开：`http://127.0.0.1:8000/`
+   默认监听 `127.0.0.1:53000`，浏览器打开：`http://127.0.0.1:53000/`
 
 3. **API 调用**
    - GET:
      ```bash
-     curl 'http://127.0.0.1:8000/api/generate?input=tt0133093'
+     curl 'http://127.0.0.1:53000/api/generate?input=tt0133093'
      ```
    - POST JSON:
      ```bash
-     curl -X POST 'http://127.0.0.1:8000/api/generate' \
+     curl -X POST 'http://127.0.0.1:53000/api/generate' \
        -H 'Content-Type: application/json' \
        -d '{"input":"tt0133093"}'
      ```

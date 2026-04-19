@@ -630,7 +630,7 @@ def main() -> None:
     #   python ptgen.py --serve [host] [port] -> 启动 Web + API
     if len(sys.argv) >= 2 and sys.argv[1] == "--serve":
         host = sys.argv[2] if len(sys.argv) >= 3 else "127.0.0.1"
-        port = int(sys.argv[3]) if len(sys.argv) >= 4 else 8000
+        port = int(sys.argv[3]) if len(sys.argv) >= 4 else 53000
         run_server(host, port)
         return
 
