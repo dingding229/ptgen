@@ -32,6 +32,7 @@ type App struct {
 	adminUser  string
 	adminPass  string
 	issuerName string
+	pyCmd      string
 	mu         sync.Mutex
 }
 
@@ -54,6 +55,7 @@ func main() {
 		adminUser:  envOr("PTGEN_ADMIN_USER", "admin"),
 		adminPass:  envOr("PTGEN_ADMIN_PASSWORD", "admin123"),
 		issuerName: "ptgen-go",
+		pyCmd:      envOr("PTGEN_PY_CMD", "python3 ptgen.py"),
 	}
 
 	if err := app.initDB(); err != nil {
@@ -223,7 +225,10 @@ func (a *App) generateFromInput(input string) (string, error) {
 	if v, hit := a.cacheGet(key); hit {
 		return v, nil
 	}
-	result := formatResult(input)
+	result, err := a.runLegacyPTGen(input)
+	if err != nil {
+		return "", err
+	}
 	_ = a.cacheSet(key, result)
 	return result, nil
 }
@@ -240,8 +245,26 @@ func normalizeKey(input string) (string, bool) {
 	return "", false
 }
 
-func formatResult(input string) string {
-	return fmt.Sprintf("[img]https://placehold.co/600x900?text=ptgen-go[/img]\n\n◎输入        %s\n◎说明        由 Go 服务处理（可继续接入真实抓取逻辑）", input)
+func (a *App) runLegacyPTGen(input string) (string, error) {
+	parts := strings.Fields(a.pyCmd)
+	if len(parts) == 0 {
+		return "", errors.New("PTGEN_PY_CMD 未配置")
+	}
+	args := append(parts[1:], input)
+	cmd := exec.Command(parts[0], args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("ptgen 引擎执行失败: %s", msg)
+	}
+	txt := strings.TrimSpace(string(out))
+	if txt == "" {
+		return "", errors.New("ptgen 引擎未返回内容")
+	}
+	return txt, nil
 }
 
 func (a *App) cacheGet(key string) (string, bool) {
